@@ -10,10 +10,9 @@ import axios from "axios";
 const TEAFI_RPC_URL = "https://polygon-bor-rpc.publicnode.com";
 const TEAFI_CHAIN_ID = 137;
 const POL_ADDRESS = "0x0000000000000000000000000000000000000000";
-const USDC_ADDRESS = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
-const USDT_ADDRESS = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F";
-const ROUTER_ADDRESS = "0xEb6132FAF257e9EBCAed78055C5302D81eb948BE";
-const QUOTE_API_URL = "https://api.tea-fi.com/lifi/quote";
+const WPOL_ADDRESS = "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270";
+const TPOL_ADDRESS = "0x1Cd0cd01c8C902AdAb3430ae04b9ea32CB309CF1";
+const WRAP_CONTRACT_ADDRESS = TPOL_ADDRESS;
 const TRANSACTION_API_URL = "https://api.tea-fi.com/transaction";
 const CHECKIN_STATUS_URL = "https://api.tea-fi.com/wallet/check-in/current";
 const CHECKIN_URL = "https://api.tea-fi.com/wallet/check-in";
@@ -21,15 +20,15 @@ const CONFIG_FILE = "config.json";
 const isDebug = false;
 
 const swapDirections = [
-  { from: "USDC", to: "USDT", tokenIn: USDC_ADDRESS, tokenOut: USDT_ADDRESS },
-  { from: "USDT", to: "USDC", tokenIn: USDT_ADDRESS, tokenOut: USDC_ADDRESS }
+  { from: "WPOL", to: "tPOL", tokenIn: WPOL_ADDRESS, tokenOut: TPOL_ADDRESS, type: 2 },
+  { from: "tPOL", to: "WPOL", tokenIn: TPOL_ADDRESS, tokenOut: WPOL_ADDRESS, type: 3 }
 ];
 
 let walletInfo = {
   address: "N/A",
   balancePOL: "0.0000",
-  balanceUSDC: "0.0000",
-  balanceUSDT: "0.0000",
+  balanceWPOL: "0.0000",
+  balanceTPOL: "0.0000",
   activeAccount: "N/A"
 };
 let transactionLogs = [];
@@ -45,15 +44,14 @@ const borderBlinkColors = ["cyan", "blue", "magenta", "red", "yellow", "green"];
 let borderBlinkIndex = 0;
 let blinkCounter = 0;
 let spinnerIndex = 0;
-let nonceTracker = {};
 let hasLoggedSleepInterrupt = false;
 let isHeaderRendered = false;
 let activeProcesses = 0;
 
 let dailyActivityConfig = {
   swapRepetitions: 1,
-  usdcSwapRange: { min: 1, max: 1.1 },
-  usdtSwapRange: { min: 1, max: 1.4 },
+  wpolSwapRange: { min: 5.5, max: 6 },
+  tpolSwapRange: { min: 5.5, max: 6 },
   loopHours: 24
 };
 
@@ -76,10 +74,10 @@ function loadConfig() {
       const data = fs.readFileSync(CONFIG_FILE, "utf8");
       const config = JSON.parse(data);
       dailyActivityConfig.swapRepetitions = Number(config.swapRepetitions) || 1;
-      dailyActivityConfig.usdcSwapRange.min = Number(config.usdcSwapRange?.min) || 1;
-      dailyActivityConfig.usdcSwapRange.max = Number(config.usdcSwapRange?.max) || 1.1;
-      dailyActivityConfig.usdtSwapRange.min = Number(config.usdtSwapRange?.min) || 1;
-      dailyActivityConfig.usdtSwapRange.max = Number(config.usdtSwapRange?.max) || 1.4;
+      dailyActivityConfig.wpolSwapRange.min = Number(config.wpolSwapRange?.min) || 5.5;
+      dailyActivityConfig.wpolSwapRange.max = Number(config.wpolSwapRange?.max) || 6;
+      dailyActivityConfig.tpolSwapRange.min = Number(config.tpolSwapRange?.min) || 5.5;
+      dailyActivityConfig.tpolSwapRange.max = Number(config.tpolSwapRange?.max) || 6;
       dailyActivityConfig.loopHours = Number(config.loopHours) || 24;
     } else {
       addLog("No config file found, using default settings.", "info");
@@ -228,7 +226,8 @@ function getProvider(proxyUrl, maxRetries = 3) {
       if (attempt < maxRetries) sleep(1000);
     }
   }
-  throw new Error(`Failed to initialize provider for chain ${TEAFI_CHAIN_ID}`);
+  addLog(`Failed to initialize provider for chain ${TEAFI_CHAIN_ID} after ${maxRetries} attempts.`, "error");
+  return null;
 }
 
 async function sleep(ms) {
@@ -270,27 +269,30 @@ async function updateWalletData() {
     try {
       const proxyUrl = proxies[i % proxies.length] || null;
       const provider = getProvider(proxyUrl);
+      if (!provider) {
+        throw new Error("Provider initialization failed");
+      }
       const wallet = new ethers.Wallet(account.privateKey, provider);
 
       const polBalance = await provider.getBalance(wallet.address);
       const formattedPOL = Number(ethers.formatEther(polBalance)).toFixed(4);
 
-      const usdcContract = new ethers.Contract(USDC_ADDRESS, erc20Abi, provider);
-      const usdcBalance = await usdcContract.balanceOf(wallet.address);
-      const formattedUSDC = Number(ethers.formatUnits(usdcBalance, 6)).toFixed(4);
+      const wpolContract = new ethers.Contract(WPOL_ADDRESS, erc20Abi, provider);
+      const wpolBalance = await wpolContract.balanceOf(wallet.address);
+      const formattedWPOL = Number(ethers.formatEther(wpolBalance)).toFixed(4);
 
-      const usdtContract = new ethers.Contract(USDT_ADDRESS, erc20Abi, provider);
-      const usdtBalance = await usdtContract.balanceOf(wallet.address);
-      const formattedUSDT = Number(ethers.formatUnits(usdtBalance, 6)).toFixed(4);
+      const tpolContract = new ethers.Contract(TPOL_ADDRESS, erc20Abi, provider);
+      const tpolBalance = await tpolContract.balanceOf(wallet.address);
+      const formattedTPOL = Number(ethers.formatEther(tpolBalance)).toFixed(4);
 
-      const formattedEntry = `${i === selectedWalletIndex ? "→ " : "  "}${chalk.bold.magentaBright(getShortAddress(wallet.address))}    ${chalk.bold.cyanBright(formattedPOL.padEnd(6))}  ${chalk.bold.cyanBright(formattedUSDC.padEnd(6))}  ${chalk.bold.cyanBright(formattedUSDT.padEnd(6))}`;
+      const formattedEntry = `${i === selectedWalletIndex ? "→ " : "  "}${chalk.bold.magentaBright(getShortAddress(wallet.address))}    ${chalk.bold.cyanBright(formattedPOL.padEnd(6))}  ${chalk.bold.cyanBright(formattedWPOL.padEnd(6))}  ${chalk.bold.cyanBright(formattedTPOL.padEnd(6))}`;
 
       if (i === selectedWalletIndex) {
         walletInfo.address = wallet.address;
         walletInfo.activeAccount = `Account ${i + 1}`;
         walletInfo.balancePOL = formattedPOL;
-        walletInfo.balanceUSDC = formattedUSDC;
-        walletInfo.balanceUSDT = formattedUSDT;
+        walletInfo.balanceWPOL = formattedWPOL;
+        walletInfo.balanceTPOL = formattedTPOL;
       }
       return formattedEntry;
     } catch (error) {
@@ -317,13 +319,9 @@ async function getNextNonce(provider, walletAddress) {
     addLog(`Invalid wallet address: ${walletAddress}`, "error");
     throw new Error("Invalid wallet address");
   }
-  const nonceKey = `${TEAFI_CHAIN_ID}_${walletAddress}`;
   try {
-    const pendingNonce = BigInt(await provider.getTransactionCount(walletAddress, "pending"));
-    const lastUsedNonce = nonceTracker[nonceKey] || (pendingNonce - 1n);
-    const nextNonce = pendingNonce > lastUsedNonce + 1n ? pendingNonce : lastUsedNonce + 1n;
-    nonceTracker[nonceKey] = nextNonce;
-    addLog(`Debug: Fetched nonce ${nextNonce} for ${getShortAddress(walletAddress)} on chain ${TEAFI_CHAIN_ID}`, "debug");
+    const nextNonce = BigInt(await provider.getTransactionCount(walletAddress, "pending"));
+    addLog(`Debug: Fetched fresh nonce ${nextNonce} for ${getShortAddress(walletAddress)} on chain ${TEAFI_CHAIN_ID}`, "debug");
     return nextNonce;
   } catch (error) {
     addLog(`Failed to fetch nonce for ${getShortAddress(walletAddress)} on chain ${TEAFI_CHAIN_ID}: ${error.message}`, "error");
@@ -357,95 +355,78 @@ async function getFeeParams(provider) {
   }
 }
 
-async function getSwapQuote(direction, amountIn, walletAddress, proxyUrl) {
-  const params = {
-    fromAddress: walletAddress,
-    fromAmount: amountIn.toString(),
-    fromChain: TEAFI_CHAIN_ID,
-    fromToken: direction.tokenIn,
-    toChain: TEAFI_CHAIN_ID,
-    toToken: direction.tokenOut,
-    slippage: 0.005,
-    allowExchanges: 'okx',
-    preferExchanges: 'okx',
-    gasPaymentTokenAddress: '0x0000000000000000000000000000000000000000'
-  };
+async function checkAndApproveToken(wallet, tokenAddress, spender, amountIn, provider, feeParams) {
+  const erc20Abi = ["function allowance(address owner, address spender) view returns (uint256)", "function approve(address spender, uint256 amount) returns (bool)"];
+  const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, wallet);
   try {
-    const headers = { ...Headers, 'user-agent': userAgents[Math.floor(Math.random() * userAgents.length)] };
-    const quoteResponse = await axios.get(QUOTE_API_URL, { params, headers, httpsAgent: createAgent(proxyUrl) });
-    return quoteResponse.data.lifiQuote;
+    const allowance = await tokenContract.allowance(wallet.address, spender);
+    if (allowance < amountIn) {
+      addLog(`Approving Token Sent..`, "info");
+      const nonce = await getNextNonce(provider, wallet.address);
+      const approveTx = await tokenContract.approve(spender, ethers.MaxUint256, { ...feeParams, nonce });
+      await approveTx.wait();
+      addLog(`Approval successful: ${getShortHash(approveTx.hash)}`, "success");
+      return true;
+    }
+    return false;
   } catch (error) {
-    addLog(`Failed to get swap quote: ${error.message}`, "error");
+    addLog(`Approval failed: ${error.message}`, "error");
     throw error;
   }
 }
 
-async function checkAndApproveToken(wallet, tokenAddress, spender, amountIn, provider, feeParams) {
-  const erc20Abi = ["function allowance(address owner, address spender) view returns (uint256)", "function approve(address spender, uint256 amount) returns (bool)"];
-  const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, wallet);
-  const allowance = await tokenContract.allowance(wallet.address, spender);
-  if (allowance < amountIn) {
-    addLog(`Approving Token Sent..`, "info");
-    const nonce = await getNextNonce(provider, wallet.address);
-    const approveTx = await tokenContract.approve(spender, ethers.MaxUint256, { ...feeParams, nonce });
-    await approveTx.wait();
-    addLog(`Approval successful: ${getShortHash(approveTx.hash)}`, "success");
-    return true;
-  }
-  return false;
-}
-
-const routerInterface = new ethers.Interface([
-  "function makePublicSwap(bytes liFiSwapData, (bool, bool) synthSupport, bytes permitSingleSignature, bytes tokenSignature)"
+const wrapInterface = new ethers.Interface([
+  "function wrap(uint256 amount, address recipient)",
+  "function unwrap(uint256 amount, address recipient)"
 ]);
 
 async function performSwap(wallet, direction, amount, proxyUrl) {
   const provider = getProvider(proxyUrl);
+  if (!provider) {
+    throw new Error("Failed to get provider");
+  }
   wallet = wallet.connect(provider);
 
-  const decimals = 6;
-  const amountIn = ethers.parseUnits(amount.toString(), decimals);
+  const decimals = 18;
+  const amountIn = ethers.parseEther(amount.toString());
   const address = wallet.address.toLowerCase();
 
   const erc20Abi = ["function balanceOf(address) view returns (uint256)"];
   const tokenContract = new ethers.Contract(direction.tokenIn, erc20Abi, provider);
-  const tokenBalance = await tokenContract.balanceOf(address);
-  if (tokenBalance < amountIn) {
-    throw new Error(`Insufficient ${direction.from} balance: ${ethers.formatUnits(tokenBalance, decimals)} < ${amount}`);
+  try {
+    const tokenBalance = await tokenContract.balanceOf(address);
+    if (tokenBalance < amountIn) {
+      throw new Error(`Insufficient ${direction.from} balance: ${ethers.formatEther(tokenBalance)} < ${amount}`);
+    }
+  } catch (error) {
+    addLog(`Balance check failed: ${error.message}`, "error");
+    throw error;
   }
 
-  const quote = await getSwapQuote(direction, amountIn, address, proxyUrl);
-
-  const liFiSwapData = quote.transactionRequest.data;
-  const synthSupport = [false, false];
-  const permitSingleSignature = "0x";
-  const tokenSignature = "0x";
-
-  const calldata = routerInterface.encodeFunctionData("makePublicSwap", [
-    liFiSwapData,
-    synthSupport,
-    permitSingleSignature,
-    tokenSignature
-  ]);
+  const method = direction.from === "WPOL" ? "wrap" : "unwrap";
+  const calldata = wrapInterface.encodeFunctionData(method, [amountIn, wallet.address]);
 
   const feeParams = await getFeeParams(provider);
 
-  if (direction.tokenIn !== POL_ADDRESS) {
-    await checkAndApproveToken(wallet, direction.tokenIn, quote.estimate.approvalAddress, amountIn, provider, feeParams);
-  }
+  await checkAndApproveToken(wallet, direction.tokenIn, WRAP_CONTRACT_ADDRESS, amountIn, provider, feeParams);
 
   const txParams = {
-    to: ROUTER_ADDRESS,
+    to: WRAP_CONTRACT_ADDRESS,
     data: calldata,
     value: 0n,
     ...feeParams,
-    gasLimit: BigInt(quote.transactionRequest.gasLimit) 
+    gasLimit: BigInt(500000)
   };
 
-  const balance = await provider.getBalance(address);
-  const estimatedGasCost = txParams.gasPrice ? txParams.gasPrice * txParams.gasLimit : txParams.maxFeePerGas * txParams.gasLimit;
-  if (balance < estimatedGasCost) {
-    throw new Error(`Insufficient POL balance for gas: ${ethers.formatEther(balance)} < ${ethers.formatEther(estimatedGasCost)}`);
+  try {
+    const balance = await provider.getBalance(address);
+    const estimatedGasCost = txParams.gasPrice ? txParams.gasPrice * txParams.gasLimit : txParams.maxFeePerGas * txParams.gasLimit;
+    if (balance < estimatedGasCost) {
+      throw new Error(`Insufficient POL balance for gas: ${ethers.formatEther(balance)} < ${ethers.formatEther(estimatedGasCost)}`);
+    }
+  } catch (error) {
+    addLog(`Gas estimation failed: ${error.message}`, "error");
+    throw error;
   }
 
   const nonce = await getNextNonce(provider, address);
@@ -459,11 +440,6 @@ async function performSwap(wallet, direction, amount, proxyUrl) {
     addLog(`Swap Transaction sent: ${getShortHash(tx.hash)}`, "warn");
   } catch (error) {
     addLog(`Transaction failed: ${error.message}`, "error");
-    if (error.message.includes("nonce")) {
-      const nonceKey = `${TEAFI_CHAIN_ID}_${address}`;
-      delete nonceTracker[nonceKey];
-      addLog(`Nonce error detected, resetting nonce for next attempt.`, "warn");
-    }
     throw error;
   }
 
@@ -495,19 +471,18 @@ async function performSwap(wallet, direction, amount, proxyUrl) {
   const postData = {
     hash: receipt.hash.toLowerCase(),
     blockchainId: TEAFI_CHAIN_ID,
-    type: 0,
+    type: direction.type,
     walletAddress: address.toLowerCase(),
     fromTokenAddress: direction.tokenIn.toLowerCase(),
     toTokenAddress: direction.tokenOut.toLowerCase(),
     fromTokenSymbol: direction.from,
     toTokenSymbol: direction.to,
     fromAmount: amountIn.toString(),
-    toAmount: quote.estimate.toAmount,
+    toAmount: amountIn.toString(),
     gasFeeTokenAddress: '0x0000000000000000000000000000000000000000'.toLowerCase(),
     gasFeeTokenSymbol: 'POL',
     gasFeeAmount: gasFeeAmount
   };
-
 
   try {
     const postResponse = await axios.post(TRANSACTION_API_URL, postData, { headers: Headers, httpsAgent: createAgent(proxyUrl) });
@@ -528,9 +503,13 @@ async function monitorTransaction(provider, txHash, timeoutMs) {
       throw new Error("Transaction confirmation timed out");
     }
 
-    const receipt = await provider.getTransactionReceipt(txHash);
-    if (receipt && receipt.blockNumber) {
-      return receipt;
+    try {
+      const receipt = await provider.getTransactionReceipt(txHash);
+      if (receipt && receipt.blockNumber) {
+        return receipt;
+      }
+    } catch (error) {
+      addLog(`Monitor transaction error: ${error.message}`, "error");
     }
 
     await sleep(5000);
@@ -598,10 +577,10 @@ async function runDailyActivity() {
       for (let swapCount = 0; swapCount < dailyActivityConfig.swapRepetitions && !shouldStop; swapCount++) {
         const currentDirection = swapDirections[directionIndex % swapDirections.length];
         let amount;
-        if (currentDirection.from === "USDC") {
-          amount = (Math.random() * (dailyActivityConfig.usdcSwapRange.max - dailyActivityConfig.usdcSwapRange.min) + dailyActivityConfig.usdcSwapRange.min).toFixed(3);
-        } else if (currentDirection.from === "USDT") {
-          amount = (Math.random() * (dailyActivityConfig.usdtSwapRange.max - dailyActivityConfig.usdtSwapRange.min) + dailyActivityConfig.usdtSwapRange.min).toFixed(3);
+        if (currentDirection.from === "WPOL") {
+          amount = (Math.random() * (dailyActivityConfig.wpolSwapRange.max - dailyActivityConfig.wpolSwapRange.min) + dailyActivityConfig.wpolSwapRange.min).toFixed(3);
+        } else if (currentDirection.from === "tPOL") {
+          amount = (Math.random() * (dailyActivityConfig.tpolSwapRange.max - dailyActivityConfig.tpolSwapRange.min) + dailyActivityConfig.tpolSwapRange.min).toFixed(3);
         }
         addLog(`Account ${accountIndex + 1} - Swap ${swapCount + 1}: ${amount} ${currentDirection.from} ➯ ${currentDirection.to}`, "warn");
         try {
@@ -679,7 +658,6 @@ async function runDailyActivity() {
       updateStatus();
       safeRender();
     }
-    nonceTracker = {};
   }
 }
 
@@ -790,8 +768,8 @@ const dailyActivitySubMenu = blessed.list({
   },
   items: [
     "Set Swap Repetitions",
-    "Set USDC Swap Range",
-    "Set USDT Swap Range",
+    "Set WPOL Swap Range",
+    "Set TPOL Swap Range",
     "Set Loop Daily",
     "Back to Main Menu"
   ],
@@ -977,7 +955,7 @@ function updateStatus() {
 async function updateWallets() {
   try {
     const walletData = await updateWalletData();
-    const header = `${chalk.bold.cyan("  Address").padEnd(20)}           ${chalk.bold.cyan("POL".padEnd(6))}  ${chalk.bold.cyan("USDC".padEnd(6))}   ${chalk.bold.cyan("USDT".padEnd(6))}`;
+    const header = `${chalk.bold.cyan("  Address").padEnd(20)}           ${chalk.bold.cyan("POL".padEnd(6))}  ${chalk.bold.cyan("WPOL".padEnd(6))}   ${chalk.bold.cyan("tPOL".padEnd(6))}`;
     const separator = chalk.gray("-".repeat(100));
     walletBox.setItems([header, separator, ...walletData]);
     walletBox.select(0);
@@ -1132,13 +1110,13 @@ dailyActivitySubMenu.on("select", (item) => {
         }
       }, 100);
       break;
-    case "Set USDC Swap Range":
-      configForm.configType = "usdcSwapRange";
-      configForm.setLabel(" Enter USDC Swap Range ");
+    case "Set WPOL Swap Range":
+      configForm.configType = "wpolSwapRange";
+      configForm.setLabel(" Enter WPOL Swap Range ");
       minLabel.show();
       maxLabel.show();
-      configInput.setValue(dailyActivityConfig.usdcSwapRange.min.toString());
-      configInputMax.setValue(dailyActivityConfig.usdcSwapRange.max.toString());
+      configInput.setValue(dailyActivityConfig.wpolSwapRange.min.toString());
+      configInputMax.setValue(dailyActivityConfig.wpolSwapRange.max.toString());
       configInputMax.show();
       configForm.show();
       setTimeout(() => {
@@ -1149,13 +1127,13 @@ dailyActivitySubMenu.on("select", (item) => {
         }
       }, 100);
       break;
-    case "Set USDT Swap Range":
-      configForm.configType = "usdtSwapRange";
-      configForm.setLabel(" Enter USDT Swap Range ");
+    case "Set TPOL Swap Range":
+      configForm.configType = "tpolSwapRange";
+      configForm.setLabel(" Enter TPOL Swap Range ");
       minLabel.show();
       maxLabel.show();
-      configInput.setValue(dailyActivityConfig.usdtSwapRange.min.toString());
-      configInputMax.setValue(dailyActivityConfig.usdtSwapRange.max.toString());
+      configInput.setValue(dailyActivityConfig.tpolSwapRange.min.toString());
+      configInputMax.setValue(dailyActivityConfig.tpolSwapRange.max.toString());
       configInputMax.show();
       configForm.show();
       setTimeout(() => {
@@ -1212,7 +1190,7 @@ configForm.on("submit", () => {
     } else {
       value = parseFloat(inputValue);
     }
-    if (["usdcSwapRange", "usdtSwapRange"].includes(configForm.configType)) {
+    if (["wpolSwapRange", "tpolSwapRange"].includes(configForm.configType)) {
       maxValue = parseFloat(configInputMax.getValue().trim());
       if (isNaN(maxValue) || maxValue <= 0) {
         addLog("Invalid Max value. Please enter a positive number.", "error");
@@ -1251,7 +1229,7 @@ configForm.on("submit", () => {
   if (configForm.configType === "swapRepetitions") {
     dailyActivityConfig.swapRepetitions = Math.floor(value);
     addLog(`Swap Repetitions set to ${dailyActivityConfig.swapRepetitions}`, "success");
-  } else if (configForm.configType === "usdcSwapRange") {
+  } else if (configForm.configType === "wpolSwapRange") {
     if (value > maxValue) {
       addLog("Min value cannot be greater than Max value.", "error");
       configInput.clearValue();
@@ -1261,10 +1239,10 @@ configForm.on("submit", () => {
       isSubmitting = false;
       return;
     }
-    dailyActivityConfig.usdcSwapRange.min = value;
-    dailyActivityConfig.usdcSwapRange.max = maxValue;
-    addLog(`USDC Swap Range set to ${value} - ${maxValue}`, "success");
-  } else if (configForm.configType === "usdtSwapRange") {
+    dailyActivityConfig.wpolSwapRange.min = value;
+    dailyActivityConfig.wpolSwapRange.max = maxValue;
+    addLog(`WPOL Swap Range set to ${value} - ${maxValue}`, "success");
+  } else if (configForm.configType === "tpolSwapRange") {
     if (value > maxValue) {
       addLog("Min value cannot be greater than Max value.", "error");
       configInput.clearValue();
@@ -1274,9 +1252,9 @@ configForm.on("submit", () => {
       isSubmitting = false;
       return;
     }
-    dailyActivityConfig.usdtSwapRange.min = value;
-    dailyActivityConfig.usdtSwapRange.max = maxValue;
-    addLog(`USDT Swap Range set to ${value} - ${maxValue}`, "success");
+    dailyActivityConfig.tpolSwapRange.min = value;
+    dailyActivityConfig.tpolSwapRange.max = maxValue;
+    addLog(`TPOL Swap Range set to ${value} - ${maxValue}`, "success");
   } else if (configForm.configType === "loopHours") {
     dailyActivityConfig.loopHours = value;
     addLog(`Loop Daily set to ${value} hours`, "success");
@@ -1298,7 +1276,7 @@ configForm.on("submit", () => {
 });
 
 configInput.key(["enter"], () => {
-  if (["usdcSwapRange", "usdtSwapRange"].includes(configForm.configType)) {
+  if (["wpolSwapRange", "tpolSwapRange"].includes(configForm.configType)) {
     screen.focusPush(configInputMax);
   } else {
     configForm.submit();
